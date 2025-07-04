@@ -235,15 +235,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		Str("path", r.URL.Path).
 		Msg("Method not allowed")
 	http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-	return
 }
-
-// handleRequestWithContext processes JSON-RPC requests with the provided context.
-func (h *Handler) handleRequestWithContext(w http.ResponseWriter, flusher http.Flusher, req *jsonrpc.Request, ctx context.Context) {
-	h.handleRequest(w, flusher, req, ctx)
-}
-
-
 
 // handleInitialize handles the initialize request according to MCP specification
 func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, req *jsonrpc.Request, ctx context.Context) {
@@ -273,7 +265,7 @@ func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, 
         Int("tool_count", len(toolList)).
         Msg("Found registered tools")
 
-    tools := make([]map[string]interface{}, 0, len(toolList))
+    tools := make([]map[string]any, 0, len(toolList))
     for _, tool := range toolList {
         toolName := tool.Name()
         h.logger.Debug().
@@ -281,7 +273,7 @@ func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, 
             Msg("Including tool in list")
 
         // Create a tool definition according to MCP specification
-        toolDef := map[string]interface{}{
+        toolDef := map[string]any{
             "name": toolName,
             "annotations": map[string]interface{}{
                 "title":       fmt.Sprintf("%s Tool", toolName),
@@ -292,10 +284,10 @@ func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, 
         // Special case for weather tool
         if toolName == "weather" {
             toolDef["description"] = "Get current weather for a city"
-            toolDef["inputSchema"] = map[string]interface{}{
+            toolDef["inputSchema"] = map[string]any{
                 "type": "object",
-                "properties": map[string]interface{}{
-                    "city": map[string]interface{}{
+                "properties": map[string]any{
+                    "city": map[string]any{
                         "type":        "string",
                         "description": "The city to get weather for",
                     },
@@ -305,10 +297,10 @@ func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, 
         } else {
             // Default schema for other tools
             toolDef["description"] = fmt.Sprintf("A tool named %s", toolName)
-            toolDef["inputSchema"] = map[string]interface{}{
+            toolDef["inputSchema"] = map[string]any{
                 "type": "object",
-                "properties": map[string]interface{}{
-                    "input": map[string]interface{}{
+                "properties": map[string]any{
+                    "input": map[string]any{
                         "type":        "string",
                         "description": "Input for the tool",
                     },
@@ -398,47 +390,12 @@ func (h *Handler) handleToolsList(w http.ResponseWriter, req *jsonrpc.Request, c
 
     tools := make([]map[string]any, 0, len(toolList))
     for _, tool := range toolList {
-        toolName := tool.Name()
         h.logger.Debug().
-            Str("tool_name", toolName).
+            Str("tool_name", tool.Name()).
             Msg("Including tool in list")
 
-        // Create a tool definition according to MCP specification
-        toolDef := map[string]any{
-            "name": toolName,
-            "annotations": map[string]any{
-                "title":       fmt.Sprintf("%s Tool", toolName),
-                "openWorldHint": true,  // Indicates the tool interacts with external services
-            },
-        }
-
-        // Special case for weather tool
-        if toolName == "weather" {
-            toolDef["description"] = "Get current weather for a city"
-            toolDef["inputSchema"] = map[string]any{
-                "type": "object",
-                "properties": map[string]any{
-                    "city": map[string]any{
-                        "type":        "string",
-                        "description": "The city to get weather for",
-                    },
-                },
-                "required": []string{"city"},
-            }
-        } else {
-            // Default schema for other tools
-            toolDef["description"] = fmt.Sprintf("A tool named %s", toolName)
-            toolDef["inputSchema"] = map[string]any{
-                "type": "object",
-                "properties": map[string]any{
-                    "input": map[string]any{
-                        "type":        "string",
-                        "description": "Input for the tool",
-                    },
-                },
-                "required": []string{"input"},
-            }
-        }
+        // Get the tool definition from the tool itself
+        toolDef := tool.GetToolDefinition()
         tools = append(tools, toolDef)
     }
 
@@ -549,11 +506,25 @@ func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flushe
 	// Execute the tool with the context
 	result, err := h.toolRegistry.Call(ctx, params.Name, params.Arguments)
 	if err != nil {
-		h.sendError(w, flusher, jsonrpc.NewError(
-			jsonrpc.InternalError,
-			fmt.Sprintf("Failed to execute tool '%s'", params.Name),
-			err.Error(),
-		))
+		h.logger.Error().
+			Err(err).
+			Str("tool_name", params.Name).
+			Msg("Tool execution failed")
+
+		// For MCP, tool errors should be returned in the result object, not as protocol errors
+		// This allows the client to handle the error appropriately
+		errResult := map[string]any{
+			"isError": true,
+			"content": []map[string]any{
+				{
+					"type":  "text",
+					"text":  err.Error(),
+				},
+			},
+		}
+
+		// Send the error as a successful response with error details in the result
+		h.sendResponse(w, flusher, req.ID, errResult)
 		return
 	}
 
@@ -614,8 +585,11 @@ func (h *Handler) sendJSONResponse(w http.ResponseWriter, flusher http.Flusher, 
 		Msg(fmt.Sprintf("Sending %s", responseType))
 
 	if flusher != nil {
-		// For SSE, send as an event
-		_, err = fmt.Fprintf(w, "data: %s\n\n", jsonData)
+		// For SSE, send as a properly formatted event
+		// Format: "data: {json}\nid: {id}\n\n"
+		// Use a unique ID for each message (using timestamp for simplicity)
+		id := time.Now().UnixNano()
+		_, err = fmt.Fprintf(w, "data: %s\nid: %d\n\n", jsonData, id)
 		if err != nil {
 			h.logger.Error().Err(err).Msg("Failed to write SSE message")
 			return err

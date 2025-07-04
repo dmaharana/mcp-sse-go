@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mcp-sse-go/internal/tools"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,21 +28,38 @@ const (
 )
 
 // WeatherTool is a tool that provides weather information.
-type WeatherTool struct{}
+type WeatherTool struct {
+	*tools.DefaultTool
+}
 
 // NewWeatherTool creates a new WeatherTool instance.
 func NewWeatherTool() *WeatherTool {
-	tool := &WeatherTool{}
+	tool := &WeatherTool{
+		DefaultTool: tools.NewDefaultTool("weather", "Get current weather for a city"),
+	}
 	// Log the creation of the weather tool
-	// Note: In a production environment, you might want to use a proper logger
-	// For now, we'll use the standard log package
 	log.Printf("Creating new WeatherTool instance with name: %s", tool.Name())
 	return tool
 }
 
-// Name returns the name of the tool.
-func (t *WeatherTool) Name() string {
-	return "weather"
+// GetToolDefinition returns the tool definition in MCP format
+func (t *WeatherTool) GetToolDefinition() map[string]any {
+	// Get the default tool definition
+	def := t.DefaultTool.GetToolDefinition()
+	
+	// Override with weather-specific schema
+	def["inputSchema"] = map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"city": map[string]any{
+				"type":        "string",
+				"description": "The city to get weather for",
+			},
+		},
+		"required": []string{"city"},
+	}
+	
+	return def
 }
 
 // Call executes the weather tool with the given arguments.

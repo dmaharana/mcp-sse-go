@@ -31,8 +31,8 @@ func New(cfg Config) (http.Handler, error) {
 	// List all registered tools for debugging
 	toolList := toolRegistry.List()
 	log.Printf("Total tools registered: %d", len(toolList))
-	for name := range toolList {
-		log.Printf(" - %s", name)
+	for name, tool := range toolList {
+		log.Printf(" - %s (%T)", name, tool)
 	}
 
 	// Create MCP handler
