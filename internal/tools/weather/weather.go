@@ -7,6 +7,8 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
+	"strings"
 )
 
 // Args represents the arguments for the weather tool.
@@ -65,19 +67,21 @@ func (t *WeatherTool) Call(ctx context.Context, args json.RawMessage) (json.RawM
 		return nil, fmt.Errorf("missing or invalid API key in context")
 	}
 
+	// Construct the full URL with query parameters
+	fullURL := fmt.Sprintf("%s/current.json?key=%s&q=%s&aqi=no", 
+		strings.TrimSuffix(apiURL, "/"),
+		url.QueryEscape(apiKey),
+		url.QueryEscape(params.City),
+	)
+
 	// Create request
-	req, err := http.NewRequest("GET", apiURL, nil)
+	req, err := http.NewRequest("GET", fullURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %w", err)
 	}
 
-	// Add query parameters
-	q := req.URL.Query()
-	q.Add("q", params.City)
-	req.URL.RawQuery = q.Encode()
-
-	// Add API key header
-	req.Header.Add("X-API-Key", apiKey)
+	// Set headers
+	req.Header.Set("Accept", "application/json")
 
 	// Send request
 	resp, err := http.DefaultClient.Do(req)
@@ -97,5 +101,59 @@ func (t *WeatherTool) Call(ctx context.Context, args json.RawMessage) (json.RawM
 		return nil, fmt.Errorf("unexpected status code: %d, body: %s", resp.StatusCode, string(body))
 	}
 
-	return body, nil
+	// Parse the weather data
+	var weatherData struct {
+		Location struct {
+			Name    string `json:"name"`
+			Region  string `json:"region"`
+			Country string `json:"country"`
+		} `json:"location"`
+		Current struct {
+			TempC     float64 `json:"temp_c"`
+			TempF     float64 `json:"temp_f"`
+			Condition struct {
+				Text string `json:"text"`
+			} `json:"condition"`
+			Humidity  int     `json:"humidity"`
+			WindKPH   float64 `json:"wind_kph"`
+			FeelsLikeC float64 `json:"feelslike_c"`
+		} `json:"current"`
+	}
+
+	if err := json.Unmarshal(body, &weatherData); err != nil {
+		return nil, fmt.Errorf("failed to parse weather data: %w", err)
+	}
+
+	// Format the response as markdown
+	markdown := fmt.Sprintf(`# 🌤️ Weather in %s, %s, %s
+**Temperature:** %.1f°C (%.1f°F) - Feels like %.1f°C
+**Condition:** %s
+**Humidity:** %d%%
+**Wind:** %.1f km/h`,
+		weatherData.Location.Name,
+		weatherData.Location.Region,
+		weatherData.Location.Country,
+		weatherData.Current.TempC,
+		weatherData.Current.TempF,
+		weatherData.Current.FeelsLikeC,
+		weatherData.Current.Condition.Text,
+		weatherData.Current.Humidity,
+		weatherData.Current.WindKPH,
+	)
+
+	// The client expects a response with a specific structure
+	// Create a response that matches the client's expected format
+	response := map[string]interface{}{
+		"content": []interface{}{
+			map[string]interface{}{
+				"type": "text",
+				"text": markdown,
+			},
+		},
+	}
+
+	// Log the response for debugging
+	log.Printf("Sending weather response: %+v", response)
+
+	return json.Marshal(response)
 }

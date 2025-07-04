@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"os"
 
@@ -15,10 +16,27 @@ func main() {
 	// Configure logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
 	zerolog.SetGlobalLevel(zerolog.DebugLevel) // Set to DebugLevel to see all logs
-	logger := zerolog.New(zerolog.ConsoleWriter{Out: os.Stderr, TimeFormat: "15:04:05"}).
+	output := zerolog.ConsoleWriter{
+		Out:        os.Stderr,
+		TimeFormat: "15:04:05",
+	}
+	logger := zerolog.New(output).
 		With().
 		Timestamp().
+		Caller().
 		Logger()
+	zerolog.CallerMarshalFunc = func(pc uintptr, file string, line int) string {
+		// Get relative path from the project root
+		short := file
+		for i := len(file) - 1; i > 0; i-- {
+			if file[i] == '/' {
+				short = file[i+1:]
+				break
+			}
+		}
+		file = short
+		return fmt.Sprintf("%s:%d", file, line)
+	}
 
 	logger.Info().Msg("Starting MCP SSE server with debug logging")
 
