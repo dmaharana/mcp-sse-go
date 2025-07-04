@@ -9,6 +9,8 @@ import (
 	"mcp-sse-go/internal/server"
 )
 
+const defaultPort = "8080"
+
 func main() {
 	// Configure logger
 	zerolog.TimeFieldFormat = zerolog.TimeFormatUnix
@@ -29,8 +31,13 @@ func main() {
 		logger.Fatal().Err(err).Msg("Failed to create server")
 	}
 
-	// Start server
-	addr := ":8080"
+	// Get port from environment variable or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = defaultPort
+	}
+	addr := ":" + port
+
 	server := &http.Server{
 		Addr:     addr,
 		Handler:  handler,
