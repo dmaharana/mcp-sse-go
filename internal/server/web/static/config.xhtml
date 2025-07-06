@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml" xml:lang="en">
+<head>
+    <meta charset="UTF-8"/>
+    <title>MCP Server Configuration</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            line-height: 1.6;
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 30px 30px 30px 60px;  /* Added more left padding */
+            color: #333;
+            background-color: #fff;
+            box-sizing: border-box;
+        }
+        h1 {
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+        }
+        h2 {
+            color: #2980b9;
+            margin-top: 25px;
+        }
+        pre {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+        }
+        code {
+            font-family: 'Courier New', monospace;
+            background-color: #f0f0f0;
+            padding: 2px 5px;
+            border-radius: 3px;
+        }
+        .note {
+            background-color: #e7f4ff;
+            border-left: 4px solid #3498db;
+            padding: 10px 15px;
+            margin: 15px 0;
+        }
+        .config-block {
+            background-color: #f8f9fa;
+            border: 1px solid #dee2e6;
+            border-radius: 4px;
+            padding: 20px 20px 20px 30px;  /* Added more left padding */
+            margin: 20px 0 20px 20px;      /* Added left margin */
+            overflow-x: auto;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .copy-btn {
+            background-color: #3498db;
+            color: white;
+            border: none;
+            padding: 5px 10px;
+            border-radius: 3px;
+            cursor: pointer;
+            margin-top: 10px;
+        }
+        .copy-btn:hover {
+            background-color: #2980b9;
+        }
+    </style>
+</head>
+<body>
+    <h1>MCP Server Configuration</h1>
+    
+    <section>
+        <h2>Server Endpoints</h2>
+        <p>The MCP server provides the following endpoints:</p>
+        <ul>
+            <li><strong>SSE Endpoint:</strong> <code>/sse</code> (GET/POST)</li>
+            <li><strong>Health Check:</strong> <code>/health</code> (GET)</li>
+            <li><strong>This Page:</strong> <code>/config</code> (GET)</li>
+        </ul>
+    </section>
+
+    <section>
+        <h2>Required Headers</h2>
+        <p>When making requests to the MCP server, include these headers:</p>
+        <ul>
+            <li><code>X-Weather-API-URL</code>: Base URL for the weather API</li>
+            <li><code>X-Weather-API-Key</code>: API key for the weather service</li>
+        </ul>
+        
+        <div class="note">
+            <strong>Note:</strong> The server has CORS enabled and accepts requests from any origin.
+            For production, you should restrict the allowed origins.
+        </div>
+    </section>
+
+    <section>
+        <h2>IDE Configuration</h2>
+        <p>Use the following configuration in your IDE or development environment:</p>
+        
+        <div class="config-block">
+            <pre><code id="ideConfig">{
+  "my-mcp-server": {
+    "url": "<span id="serverUrl">http://your-server:8080/sse</span>",
+    "headers": {
+      "X-Weather-API-URL": "https://api.weatherapi.com/v1",
+      "X-Weather-API-Key": "YOUR_TOKEN"
+    }
+  }
+}</code></pre>
+            <button class="copy-btn" onclick="copyConfigToClipboard()">Copy to Clipboard</button>
+        </div>
+        
+        <p>Or add this to your IDE's settings (e.g., VS Code's <code>settings.json</code>):</p>
+        
+        <div class="config-block">
+            <pre><code id="ideSettings">{
+  "mcp.server": {
+    "url": "<span id="serverUrl2">http://your-server:8080/sse</span>",
+    "headers": {
+      "X-Weather-API-URL": "https://api.weatherapi.com/v1",
+      "X-Weather-API-Key": "YOUR_TOKEN"
+    }
+  }
+}</code></pre>
+            <button class="copy-btn" onclick="copySettingsToClipboard()">Copy to Clipboard</button>
+        </div>
+    </section>
+
+    <section>
+        <h2>Example Request</h2>
+        <p>Here's an example of how to connect to the SSE endpoint:</p>
+        <pre><code>const eventSource = new EventSource('http://your-server:8080/sse');
+
+eventSource.onmessage = function(event) {
+    console.log('Received message:', event.data);
+};
+
+eventSource.onerror = function(error) {
+    console.error('EventSource error:', error);
+    eventSource.close();
+};</code></pre>
+    </section>
+
+    <section>
+        <h2>Configuration</h2>
+        <p>The server is configured with the following defaults:</p>
+        <ul>
+            <li>Port: 8080</li>
+            <li>CORS: Enabled for all origins</li>
+            <li>Request Timeout: 60 seconds</li>
+        </ul>
+    </section>
+
+    <script>
+        // Update server URLs with current host
+        document.addEventListener('DOMContentLoaded', function() {
+            const serverUrl = window.location.origin + '/sse';
+            document.querySelectorAll('#serverUrl, #serverUrl2').forEach(el => {
+                el.textContent = serverUrl;
+            });
+        });
+
+        function copyToClipboard(text) {
+            navigator.clipboard.writeText(text).then(() => {
+                alert('Configuration copied to clipboard!');
+            }).catch(err => {
+                console.error('Failed to copy: ', err);
+            });
+        }
+
+        function copyConfigToClipboard() {
+            const config = {
+                "my-mcp-server": {
+                    "url": window.location.origin + '/sse',
+                    "headers": {
+                        "X-Weather-API-URL": "https://api.weatherapi.com/v1",
+                        "X-Weather-API-Key": "YOUR_TOKEN"
+                    }
+                }
+            };
+            copyToClipboard(JSON.stringify(config, null, 2));
+        }
+
+        function copySettingsToClipboard() {
+            const settings = {
+                "mcp.server": {
+                    "url": window.location.origin + '/sse',
+                    "headers": {
+                        "X-Weather-API-URL": "https://api.weatherapi.com/v1",
+                        "X-Weather-API-Key": "YOUR_TOKEN"
+                    }
+                }
+            };
+            copyToClipboard(JSON.stringify(settings, null, 2));
+        }
+    </script>
+</body>
+</html>
