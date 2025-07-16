@@ -34,6 +34,7 @@ func DefaultMiddlewareConfig() MiddlewareConfig {
 			"/.mcp/ide-config",
 			"/sessions",
 			"/sse",
+			"/metrics",
 		},
 		HeaderName: "Mcp-Session-Id",
 	}

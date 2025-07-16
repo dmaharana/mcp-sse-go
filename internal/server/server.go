@@ -14,10 +14,12 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rs/zerolog"
 
 	"mcp-sse-go/internal/mcp"
 	"mcp-sse-go/internal/session"
+	"mcp-sse-go/internal/telemetry"
 	"mcp-sse-go/internal/tools"
 	"mcp-sse-go/internal/tools/weather"
 )
@@ -86,12 +88,23 @@ func New(cfg Config) (http.Handler, error) {
 		}
 	}
 
+	// Create telemetry metrics
+	metrics := telemetry.NewMetrics()
+
+	// Create system metrics collector
+	ctx := context.Background()
+	systemCollector := telemetry.NewSystemMetricsCollector(metrics, logger, 30*time.Second)
+	go systemCollector.Start(ctx)
+
 	// Create session management components
 	sessionStore := session.NewMemoryStore(logger)
 	sessionManagerConfig := session.ManagerConfig{
 		SessionTimeout: cfg.SessionTimeout,
 	}
-	sessionManager := session.NewDefaultSessionManager(sessionStore, sessionManagerConfig, logger)
+	baseSessionManager := session.NewDefaultSessionManager(sessionStore, sessionManagerConfig, logger)
+	
+	// Wrap session manager with telemetry
+	sessionManager := telemetry.NewSessionManagerWrapper(baseSessionManager, metrics)
 
 	// Create cleanup service
 	cleanupConfig := session.CleanupConfig{
@@ -100,7 +113,6 @@ func New(cfg Config) (http.Handler, error) {
 	cleanupService := session.NewCleanupService(sessionManager, cleanupConfig, logger)
 
 	// Start cleanup service
-	ctx := context.Background()
 	if err := cleanupService.Start(ctx); err != nil {
 		return nil, fmt.Errorf("failed to start cleanup service: %w", err)
 	}
@@ -114,11 +126,14 @@ func New(cfg Config) (http.Handler, error) {
 	sessionHandler := session.NewSessionHandler(sessionManager, logger)
 
 	// Create tool registry
-	toolRegistry := tools.NewRegistry()
+	baseToolRegistry := tools.NewRegistry()
+	
+	// Wrap tool registry with telemetry
+	toolRegistry := telemetry.NewToolRegistryWrapper(baseToolRegistry, metrics)
 
 	// Register weather tool
 	weatherTool := weather.NewWeatherTool()
-	toolRegistry.Register(weatherTool)
+	baseToolRegistry.Register(weatherTool)
 	log.Printf("Registered tool: %s", weatherTool.Name())
 
 	// List all registered tools for debugging
@@ -129,7 +144,7 @@ func New(cfg Config) (http.Handler, error) {
 	}
 
 	// Create MCP handler
-	mcpHandler := mcp.NewHandler(toolRegistry)
+	mcpHandler := mcp.NewHandler(baseToolRegistry, metrics)
 
 	// Create router
 	r := chi.NewRouter()
@@ -139,6 +154,7 @@ func New(cfg Config) (http.Handler, error) {
 	r.Use(middleware.RealIP)
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
+	r.Use(telemetry.HTTPMetricsMiddleware(metrics))
 
 	// Enable CORS with session header support
 	r.Use(cors.Handler(cors.Options{
@@ -164,6 +180,9 @@ func New(cfg Config) (http.Handler, error) {
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte("OK"))
 	})
+
+	// Prometheus metrics endpoint
+	r.Handle("/metrics", promhttp.Handler())
 
 	// IDE Configuration endpoint
 	r.Get("/.mcp/ide-config", func(w http.ResponseWriter, r *http.Request) {

@@ -29,6 +29,12 @@ const (
 type Handler struct {
 	toolRegistry *tools.Registry
 	logger       zerolog.Logger
+	metrics      MetricsRecorder
+}
+
+// MetricsRecorder interface for recording tool execution metrics
+type MetricsRecorder interface {
+	RecordToolExecution(toolName, status string, duration time.Duration)
 }
 
 // WithRequest adds the HTTP request to the context and returns the new context.
@@ -43,7 +49,7 @@ func GetRequestFromContext(ctx context.Context) (*http.Request, bool) {
 }
 
 // NewHandler creates a new MCP handler.
-func NewHandler(toolRegistry *tools.Registry) *Handler {
+func NewHandler(toolRegistry *tools.Registry, metrics MetricsRecorder) *Handler {
 	// Log the number of tools registered
 	toolList := toolRegistry.List()
 	logger := log.With().
@@ -75,6 +81,7 @@ func NewHandler(toolRegistry *tools.Registry) *Handler {
 	return &Handler{
 		toolRegistry: toolRegistry,
 		logger:       logger,
+		metrics:      metrics,
 	}
 }
 
@@ -502,9 +509,22 @@ func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flushe
 		Interface("api_key", apiKey).
 		Msg("Executing tool")
 
+	// Record tool execution start time for telemetry
+	start := time.Now()
 
 	// Execute the tool with the context
 	result, err := h.toolRegistry.Call(ctx, params.Name, params.Arguments)
+	
+	// Record telemetry
+	duration := time.Since(start)
+	status := "success"
+	if err != nil {
+		status = "error"
+	}
+	if h.metrics != nil {
+		h.metrics.RecordToolExecution(params.Name, status, duration)
+	}
+
 	if err != nil {
 		h.logger.Error().
 			Err(err).
