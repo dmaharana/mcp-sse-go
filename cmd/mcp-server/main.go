@@ -41,7 +41,7 @@ func main() {
 	logger.Info().Msg("Starting MCP SSE server with debug logging")
 
 	// Configuration
-	cfg := server.Config{}
+	cfg := server.DefaultConfig()
 
 	// Create server
 	handler, err := server.New(cfg)

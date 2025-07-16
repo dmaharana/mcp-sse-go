@@ -1,19 +1,23 @@
 package server
 
 import (
+	"context"
 	"embed"
 	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/go-chi/render"
+	"github.com/rs/zerolog"
 
 	"mcp-sse-go/internal/mcp"
+	"mcp-sse-go/internal/session"
 	"mcp-sse-go/internal/tools"
 	"mcp-sse-go/internal/tools/weather"
 )
@@ -29,7 +33,21 @@ type IDEConfig struct {
 
 // Config contains the server configuration.
 type Config struct {
-	// No configuration needed as API key and URL come from headers
+	// Session configuration
+	SessionTimeout    time.Duration `yaml:"session_timeout" default:"1h"`
+	CleanupInterval   time.Duration `yaml:"cleanup_interval" default:"5m"`
+	RequireSession    bool          `yaml:"require_session" default:"true"`
+	LogLevel          string        `yaml:"log_level" default:"info"`
+}
+
+// DefaultConfig returns a Config with default values
+func DefaultConfig() Config {
+	return Config{
+		SessionTimeout:  time.Hour,
+		CleanupInterval: 5 * time.Minute,
+		RequireSession:  true,
+		LogLevel:        "info",
+	}
 }
 
 // fileServer is a wrapper around http.FileServer that works with embedded files
@@ -59,6 +77,42 @@ func getBaseURL(r *http.Request) string {
 
 // New creates a new HTTP handler with the given configuration.
 func New(cfg Config) (http.Handler, error) {
+	// Set up logger
+	logger := zerolog.New(zerolog.NewConsoleWriter()).With().Timestamp().Logger()
+	if cfg.LogLevel != "" {
+		level, err := zerolog.ParseLevel(cfg.LogLevel)
+		if err == nil {
+			logger = logger.Level(level)
+		}
+	}
+
+	// Create session management components
+	sessionStore := session.NewMemoryStore(logger)
+	sessionManagerConfig := session.ManagerConfig{
+		SessionTimeout: cfg.SessionTimeout,
+	}
+	sessionManager := session.NewDefaultSessionManager(sessionStore, sessionManagerConfig, logger)
+
+	// Create cleanup service
+	cleanupConfig := session.CleanupConfig{
+		CleanupInterval: cfg.CleanupInterval,
+	}
+	cleanupService := session.NewCleanupService(sessionManager, cleanupConfig, logger)
+
+	// Start cleanup service
+	ctx := context.Background()
+	if err := cleanupService.Start(ctx); err != nil {
+		return nil, fmt.Errorf("failed to start cleanup service: %w", err)
+	}
+
+	// Create session middleware
+	middlewareConfig := session.DefaultMiddlewareConfig()
+	middlewareConfig.RequireSession = cfg.RequireSession
+	sessionMiddleware := session.NewSessionMiddleware(sessionManager, middlewareConfig, logger)
+
+	// Create session handler
+	sessionHandler := session.NewSessionHandler(sessionManager, logger)
+
 	// Create tool registry
 	toolRegistry := tools.NewRegistry()
 
@@ -86,15 +140,18 @@ func New(cfg Config) (http.Handler, error) {
 	r.Use(middleware.Recoverer)
 	r.Use(middleware.Logger)
 
-	// Enable CORS
+	// Enable CORS with session header support
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Weather-API-URL", "X-Weather-API-Key"},
-		ExposedHeaders:   []string{"Link", "Content-Type", "Cache-Control", "Connection"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-Weather-API-URL", "X-Weather-API-Key", "Mcp-Session-Id"},
+		ExposedHeaders:   []string{"Link", "Content-Type", "Cache-Control", "Connection", "Mcp-Session-Id"},
 		AllowCredentials: true,
 		MaxAge:           300, // Maximum value not ignored by any of major browsers
 	}))
+
+	// Add session middleware (after CORS but before protected routes)
+	r.Use(sessionMiddleware.Handler())
 
 	// Serve static files from embedded filesystem
 	staticRoot, err := fs.Sub(staticFS, "web/static")
@@ -133,6 +190,13 @@ func New(cfg Config) (http.Handler, error) {
 		w.Header().Set("Content-Type", "application/xhtml+xml")
 		w.Write(data)
 	})
+
+	// Session management endpoints
+	r.Post("/sessions", sessionHandler.CreateSession)
+	r.Get("/sessions", sessionHandler.GetSession)
+	r.Delete("/sessions", sessionHandler.DeleteSession)
+	r.Put("/sessions/refresh", sessionHandler.RefreshSession)
+	r.Get("/sessions/stats", sessionHandler.GetSessionStats)
 
 	// Serve static files
 	fileServer(r, "/static", staticRoot)

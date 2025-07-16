@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "my-mcp-server": {
+      "url": "http://localhost:8080/sse",
+      "headers": {
+        "X-Weather-API-URL": "https://api.weatherapi.com/v1",
+        "X-Weather-API-Key": "9b84a492175a4672a5902434250407"
+      },
+      "disabled": false,
+      "autoApprove": []
+    }
+  }
+}
