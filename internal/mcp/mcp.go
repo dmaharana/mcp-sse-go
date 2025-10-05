@@ -23,6 +23,10 @@ type contextKey string
 const (
 	// HTTPRequestContextKey is the key used to store the HTTP request in the context.
 	HTTPRequestContextKey contextKey = "http_request"
+	ProtocolVersion       string     = "2025-06-18" // MCP protocol version
+	JSONRPCVersion        string     = "2.0"        // JSON-RPC version
+	ServerName            string     = "mcp-sse-go"
+	ServerVersion         string     = "0.1.0"
 )
 
 // Handler handles MCP protocol messages over HTTP.
@@ -30,6 +34,51 @@ type Handler struct {
 	toolRegistry *tools.Registry
 	logger       zerolog.Logger
 	metrics      MetricsRecorder
+}
+
+// MCP Initialize response structs
+type InitializeResponse struct {
+	JSONRPC string           `json:"jsonrpc"`
+	ID      any              `json:"id"`
+	Result  InitializeResult `json:"result"`
+}
+
+type InitializeResult struct {
+	ProtocolVersion string       `json:"protocolVersion"`
+	Capabilities    Capabilities `json:"capabilities"`
+	ServerInfo      ServerInfo   `json:"serverInfo"`
+}
+
+type Capabilities struct {
+	Tools     ToolsCapabilities `json:"tools"`
+	Resources any               `json:"resources"`
+}
+
+type ToolsCapabilities struct {
+	ListChanged bool `json:"listChanged"`
+}
+
+type ServerInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// ToolListResponse is the response for the tool list request.
+type ToolListResponse struct {
+	Jsonrpc string         `json:"jsonrpc"`
+	Id      any            `json:"id"`
+	Result  ToolListResult `json:"result"`
+}
+
+type ToolListResult struct {
+	Tools []ToolInfo `json:"tools"`
+}
+
+type ToolInfo struct {
+	Name        string         `json:"name"`
+	Title       string         `json:"title"`
+	Description string         `json:"description"`
+	InputSchema map[string]any `json:"inputSchema"`
 }
 
 // MetricsRecorder interface for recording tool execution metrics
@@ -112,11 +161,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Handle CORS preflight requests
 	if r.Method == http.MethodOptions {
 		h.logger.Info().Msg("Handling OPTIONS preflight request")
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Weather-API-URL, X-Weather-API-Key, Accept, Cache-Control")
 		w.Header().Set("Access-Control-Max-Age", "86400")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Expose-Headers", "Content-Type, Authorization, X-Weather-API-URL, X-Weather-API-Key, Accept, Cache-Control")
 		w.WriteHeader(http.StatusOK)
 		return
@@ -125,7 +170,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Check if this is an SSE connection
 	isSSE := strings.Contains(r.Header.Get("Accept"), "text/event-stream")
 
-	// Set up response headers for SSE if this is an SSE connection
+	// Set up response headers for SSE if applicable
 	if isSSE {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")
@@ -135,12 +180,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 	// Get flusher for SSE if this is an SSE connection
 	var flusher http.Flusher
 	if isSSE {
-		var ok bool
-		flusher, ok = w.(http.Flusher)
-		if !ok {
-			http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-			return
-		}
+		flusher, _ = w.(http.Flusher)
 	}
 
 	// Create context with request
@@ -152,7 +192,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			Bool("isSSE", isSSE).
 			Str("content-type", r.Header.Get("Content-Type")).
 			Msg("Handling JSON-RPC request")
-		
+
 		// Read the request body
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -164,7 +204,7 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 		h.logger.Debug().
 			Str("body", string(body)).
 			Msg("Raw request body")
-		
+
 		// Parse the JSON-RPC request
 		var req jsonrpc.Request
 		if err := json.Unmarshal(body, &req); err != nil {
@@ -178,36 +218,6 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 			Interface("id", req.ID).
 			Msg("Parsed JSON-RPC request")
 
-		// Set up response headers
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-
-		// Get flusher for SSE if this is an SSE connection
-		var flusher http.Flusher
-		if strings.Contains(r.Header.Get("Accept"), "text/event-stream") {
-			var ok bool
-			flusher, ok = w.(http.Flusher)
-			if !ok {
-				http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-				return
-			}
-		}
-
-		// Use the existing context and flusher
-
-		// Handle the initialization request
-		if req.Method == "initialize" {
-			h.logger.Info().Msg("Handling initialize request")
-			h.handleInitialize(w, flusher, &req, ctx)
-			return
-		}
-
-		// Handle the tools/list request
-		if req.Method == "tools/list" {
-			h.logger.Info().Msg("Handling tools/list request")
-			h.handleToolsList(w, &req, ctx)
-			return
-		}
-
 		// Handle other JSON-RPC methods
 		h.logger.Info().Str("method", req.Method).Msg("Handling JSON-RPC method")
 		h.handleRequest(w, flusher, &req, ctx)
@@ -216,7 +226,6 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 
 	// Handle GET requests (SSE connection)
 	if r.Method == http.MethodGet && isSSE {
-		// Handle SSE connection
 		h.logger.Info().Msg("Handling SSE connection")
 
 		// Keep the connection open
@@ -232,7 +241,9 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 					h.logger.Error().Err(err).Msg("Failed to send keep-alive")
 					return
 				}
-				flusher.Flush()
+				if flusher != nil {
+					flusher.Flush()
+				}
 			}
 		}
 	}
@@ -246,197 +257,215 @@ func (h *Handler) Handle(w http.ResponseWriter, r *http.Request) {
 
 // handleInitialize handles the initialize request according to MCP specification
 func (h *Handler) handleInitialize(w http.ResponseWriter, flusher http.Flusher, req *jsonrpc.Request, ctx context.Context) {
-    // Get the request from context
-    httpReq, _ := GetRequestFromContext(ctx)
-    
-    // Log detailed information about the initialize request
-    h.logger.Info().
-        Str("method", req.Method).
-        Interface("id", req.ID).
-        Str("remote_addr", httpReq.RemoteAddr).
-        Str("user_agent", httpReq.UserAgent()).
-        Msg("Handling initialize request")
-        
-    // Log all headers for debugging
-    headers := make(map[string]string)
-    for k, v := range httpReq.Header {
-        headers[k] = strings.Join(v, ", ")
-    }
-    h.logger.Debug().
-        Interface("headers", headers).
-        Msg("Initialize request headers")
+	// Get the request from context
+	httpReq, _ := GetRequestFromContext(ctx)
 
-    // List all registered tools
-    toolList := h.toolRegistry.List()
-    h.logger.Info().
-        Int("tool_count", len(toolList)).
-        Msg("Found registered tools")
+	// Log detailed information about the initialize request
+	h.logger.Info().
+		Str("method", req.Method).
+		Interface("id", req.ID).
+		Str("remote_addr", httpReq.RemoteAddr).
+		Str("user_agent", httpReq.UserAgent()).
+		Msg("Handling initialize request")
 
-    tools := make([]map[string]any, 0, len(toolList))
-    for _, tool := range toolList {
-        toolName := tool.Name()
-        h.logger.Debug().
-            Str("tool_name", toolName).
-            Msg("Including tool in list")
+	// Log all headers for debugging
+	headers := make(map[string]string)
+	for k, v := range httpReq.Header {
+		headers[k] = strings.Join(v, ", ")
+	}
+	h.logger.Debug().
+		Interface("headers", headers).
+		Msg("Initialize request headers")
 
-        // Create a tool definition according to MCP specification
-        toolDef := map[string]any{
-            "name": toolName,
-            "annotations": map[string]interface{}{
-                "title":       fmt.Sprintf("%s Tool", toolName),
-                "openWorldHint": true,  // Indicates the tool interacts with external services
-            },
-        }
+	// List all registered tools
+	toolList := h.toolRegistry.List()
+	h.logger.Info().
+		Int("tool_count", len(toolList)).
+		Msg("Found registered tools")
 
-        // Special case for weather tool
-        if toolName == "weather" {
-            toolDef["description"] = "Get current weather for a city"
-            toolDef["inputSchema"] = map[string]any{
-                "type": "object",
-                "properties": map[string]any{
-                    "city": map[string]any{
-                        "type":        "string",
-                        "description": "The city to get weather for",
-                    },
-                },
-                "required": []string{"city"},
-            }
-        } else {
-            // Default schema for other tools
-            toolDef["description"] = fmt.Sprintf("A tool named %s", toolName)
-            toolDef["inputSchema"] = map[string]any{
-                "type": "object",
-                "properties": map[string]any{
-                    "input": map[string]any{
-                        "type":        "string",
-                        "description": "Input for the tool",
-                    },
-                },
-                "required": []string{"input"},
-            }
-        }
-        tools = append(tools, toolDef)
-    }
+	tools := make([]map[string]any, 0, len(toolList))
+	for _, tool := range toolList {
+		toolName := tool.Name()
+		h.logger.Debug().
+			Str("tool_name", toolName).
+			Msg("Including tool in list")
 
-    // Create the response with the expected MCP structure
-    response := map[string]any{
-        "jsonrpc": "2.0",
-        "id":      req.ID,
-        "result": map[string]any{
-            "protocolVersion": "2025-03-26",
-            "capabilities": map[string]any{
-                "tools": map[string]any{
-                    "listChanged": true,
-                },
-                "toolUse": map[string]any{
-                    "enabled": true,
-                },
-            },
-            "serverInfo": map[string]any{
-                "name":    "mcp-sse-go",
-                "version": "0.1.0",
-            },
-            "tools": tools,  // Include tools in the initialization response
-        },
-    }
+		// Create a tool definition according to MCP specification
+		toolDef := map[string]any{
+			"name": toolName,
+			"annotations": map[string]interface{}{
+				"title":         fmt.Sprintf("%s Tool", toolName),
+				"openWorldHint": true, // Indicates the tool interacts with external services
+			},
+		}
 
-    h.logger.Info().
-        Interface("response", response).
-        Msg("Sending initialize response")
+		// Special case for weather tool
+		if toolName == "weather" {
+			toolDef["description"] = "Get current weather for a city"
+			toolDef["inputSchema"] = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"city": map[string]any{
+						"type":        "string",
+						"description": "The city to get weather for",
+					},
+				},
+				"required": []string{"city"},
+			}
+		} else {
+			// Default schema for other tools
+			toolDef["description"] = fmt.Sprintf("A tool named %s", toolName)
+			toolDef["inputSchema"] = map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"input": map[string]any{
+						"type":        "string",
+						"description": "Input for the tool",
+					},
+				},
+				"required": []string{"input"},
+			}
+		}
+		tools = append(tools, toolDef)
+	}
 
-    // Set response headers
-    w.Header().Set("Content-Type", "application/json")
-    w.Header().Set("Access-Control-Allow-Origin", "*")
-    w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-    w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Weather-API-Key, X-Weather-API-URL")
-    w.Header().Set("Access-Control-Allow-Credentials", "true")
-    w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
-    w.Header().Set("Connection", "keep-alive")
-    w.Header().Set("X-Accel-Buffering", "no")  // Disable buffering for Nginx
-    
-    // Set status code before writing the body
-    w.WriteHeader(http.StatusOK)
-    
-    // Check if this is an OPTIONS preflight request
-    if httpReq != nil && httpReq.Method == "OPTIONS" {
-        h.logger.Info().Msg("Skipping response body for OPTIONS request")
-        return
-    }
-    
-    // Encode and send the response
-    enc := json.NewEncoder(w)
-    enc.SetIndent("", "  ")  // Pretty print for debugging
-    if err := enc.Encode(response); err != nil {
-        h.logger.Error().Err(err).Msg("Failed to write initialize response")
-        return
-    }
-    
-    // Flush the response if we have a flusher
-    if flusher != nil {
-        flusher.Flush()
-    }
+	// Create the response with the expected MCP structure
+	// response := map[string]any{
+	// 	"jsonrpc": "2.0",
+	// 	"id":      req.ID,
+	// 	"result": map[string]any{
+	// 		"protocolVersion": ProtocolVersion,
+	// 		"capabilities": map[string]any{
+	// 			"tools": map[string]any{
+	// 				"listChanged": true,
+	// 			},
+	// 			"toolUse": map[string]any{
+	// 				"enabled": true,
+	// 			},
+	// 		},
+	// 		"serverInfo": map[string]any{
+	// 			"name":    "mcp-sse-go",
+	// 			"version": "0.1.0",
+	// 		},
+	// 		"tools": tools, // Include tools in the initialization response
+	// 	},
+	// }
+	response := InitializeResponse{
+		JSONRPC: JSONRPCVersion,
+		ID:      req.ID,
+		Result: InitializeResult{
+			ProtocolVersion: ProtocolVersion,
+			Capabilities: Capabilities{
+				Tools: ToolsCapabilities{
+					ListChanged: true,
+				},
+				Resources: nil,
+			},
+			ServerInfo: ServerInfo{
+				Name:    ServerName,
+				Version: ServerVersion,
+			},
+		},
+	}
 
-    h.logger.Info().
-        Int("tool_count", len(tools)).
-        Interface("tools", tools).
-        Msg("Successfully sent initialize response with tools")
+	h.logger.Info().
+		Interface("response", response).
+		Msg("Sending initialize response")
+
+	// Set response headers
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Weather-API-Key, X-Weather-API-URL")
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("X-Accel-Buffering", "no") // Disable buffering for Nginx
+
+	// Set status code before writing the body
+	w.WriteHeader(http.StatusOK)
+
+	// Check if this is an OPTIONS preflight request
+	if httpReq != nil && httpReq.Method == "OPTIONS" {
+		h.logger.Info().Msg("Skipping response body for OPTIONS request")
+		return
+	}
+
+	// Encode and send the response
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ") // Pretty print for debugging
+	if err := enc.Encode(response); err != nil {
+		h.logger.Error().Err(err).Msg("Failed to write initialize response")
+		return
+	}
+
+	// Flush the response if we have a flusher
+	if flusher != nil {
+		flusher.Flush()
+	}
+
+	h.logger.Info().
+		Int("tool_count", len(tools)).
+		Interface("tools", tools).
+		Msg("Successfully sent initialize response with tools")
 }
 
 // handleToolsList handles the tools/list request according to MCP specification
 func (h *Handler) handleToolsList(w http.ResponseWriter, req *jsonrpc.Request, ctx context.Context) {
-    h.logger.Info().
-        Str("method", req.Method).
-        Interface("id", req.ID).
-        Msg("Handling tools/list request")
+	h.logger.Info().
+		Str("method", req.Method).
+		Interface("id", req.ID).
+		Msg("Handling tools/list request")
 
-    // List all registered tools
-    toolList := h.toolRegistry.List()
-    h.logger.Info().
-        Int("tool_count", len(toolList)).
-        Msg("Found registered tools")
+	// List all registered tools
+	toolList := h.toolRegistry.List()
+	h.logger.Info().
+		Int("tool_count", len(toolList)).
+		Msg("Found registered tools")
 
-    tools := make([]map[string]any, 0, len(toolList))
-    for _, tool := range toolList {
-        h.logger.Debug().
-            Str("tool_name", tool.Name()).
-            Msg("Including tool in list")
+	tools := make([]map[string]any, 0, len(toolList))
+	for _, tool := range toolList {
+		h.logger.Debug().
+			Str("tool_name", tool.Name()).
+			Msg("Including tool in list")
 
-        // Get the tool definition from the tool itself
-        toolDef := tool.GetToolDefinition()
-        tools = append(tools, toolDef)
-    }
+		// Get the tool definition from the tool itself
+		toolDef := tool.GetToolDefinition()
+		tools = append(tools, toolDef)
+	}
 
-    // Create the response according to MCP specification
-    response := map[string]any{
-        "jsonrpc": "2.0",
-        "id":      req.ID,
-        "result": map[string]any{
-            "tools": tools,
-        },
-    }
+	// Create the response according to MCP specification
+	response := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      req.ID,
+		"result": map[string]any{
+			"tools": tools,
+		},
+	}
 
-    h.logger.Debug().
-        Interface("response", response).
-        Msg("Sending tools/list response")
+	h.logger.Debug().
+		Interface("response", response).
+		Msg("Sending tools/list response")
 
-    // Send the response as raw JSON
-    w.Header().Set("Content-Type", "application/json")
-    w.Header().Set("Access-Control-Allow-Origin", "*")
-    w.Header().Set("Cache-Control", "no-cache")
-    w.Header().Set("Connection", "keep-alive")
-    w.WriteHeader(http.StatusOK)
-    
-    enc := json.NewEncoder(w)
-    enc.SetIndent("", "  ")  // Pretty print for debugging
-    if err := enc.Encode(response); err != nil {
-        h.logger.Error().Err(err).Msg("Failed to write tools/list response")
-        return
-    }
+	// Send the response as raw JSON
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
 
-    h.logger.Info().
-        Int("tool_count", len(tools)).
-        Msg("Successfully sent tools list")
+	enc := json.NewEncoder(w)
+	enc.SetIndent("", "  ") // Pretty print for debugging
+	if err := enc.Encode(response); err != nil {
+		h.logger.Error().Err(err).Msg("Failed to write tools/list response")
+		return
+	}
+
+	h.logger.Info().
+		Int("tool_count", len(tools)).
+		Msg("Successfully sent tools list")
 }
+
 // handleRequest handles a single JSON-RPC request.
 func (h *Handler) handleRequest(w http.ResponseWriter, flusher http.Flusher, req *jsonrpc.Request, ctx context.Context) {
 	h.logger.Info().
@@ -448,9 +477,20 @@ func (h *Handler) handleRequest(w http.ResponseWriter, flusher http.Flusher, req
 	switch req.Method {
 	case "initialize":
 		h.handleInitialize(w, flusher, req, ctx)
+	case "tools/list":
+		h.handleToolsList(w, req, ctx)
+	case "notifications/tools/list_changed":
+		h.logger.Info().Msg("Handling tools/list_changed notification")
 	case "tools/execute":
 	case "tools/call":
 		h.handleToolExecution(w, flusher, req, ctx)
+	case "notifications/initialized":
+		h.handleNotification(&jsonrpc.Notification{
+			Method: req.Method,
+			Params: req.Params,
+		})
+		// No response needed for notifications
+		return
 	default:
 		h.sendError(w, flusher, jsonrpc.NewError(
 			jsonrpc.MethodNotFound,
@@ -459,8 +499,6 @@ func (h *Handler) handleRequest(w http.ResponseWriter, flusher http.Flusher, req
 		))
 	}
 }
-
-
 
 // handleToolExecution handles tool execution requests.
 func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flusher, req *jsonrpc.Request, ctx context.Context) {
@@ -494,6 +532,14 @@ func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flushe
 	apiURL := httpReq.Header.Get("X-Weather-API-URL")
 	apiKey := httpReq.Header.Get("X-Weather-API-Key")
 
+	// Unescape quoted values if present
+	if len(apiURL) >= 2 && strings.HasPrefix(apiURL, "\"") && strings.HasSuffix(apiURL, "\"") {
+		apiURL = strings.Trim(apiURL, "\"")
+	}
+	if len(apiKey) >= 2 && strings.HasPrefix(apiKey, "\"") && strings.HasSuffix(apiKey, "\"") {
+		apiKey = strings.Trim(apiKey, "\"")
+	}
+
 	// Add API key and URL to the context
 	if apiURL != "" {
 		ctx = context.WithValue(ctx, weather.ContextKeyAPIURL, apiURL)
@@ -514,7 +560,7 @@ func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flushe
 
 	// Execute the tool with the context
 	result, err := h.toolRegistry.Call(ctx, params.Name, params.Arguments)
-	
+
 	// Record telemetry
 	duration := time.Since(start)
 	status := "success"
@@ -537,8 +583,8 @@ func (h *Handler) handleToolExecution(w http.ResponseWriter, flusher http.Flushe
 			"isError": true,
 			"content": []map[string]any{
 				{
-					"type":  "text",
-					"text":  err.Error(),
+					"type": "text",
+					"text": err.Error(),
 				},
 			},
 		}
@@ -561,6 +607,22 @@ func (h *Handler) handleNotification(notif *jsonrpc.Notification) {
 	// Handle different notification types
 	switch notif.Method {
 	// Add notification handlers here
+	case "tools/listChanged":
+		h.logger.Info().Msg("Tools list changed notification received")
+		// Notify all clients about the tools list change
+	case "notifications/initialized":
+		h.logger.Info().Msg("Client initialized notification received")
+		// Handle client initialization notification
+	default:
+		h.logger.Warn().
+			Str("method", notif.Method).
+			Msg("Unknown notification method")
+		// Optionally, send an error response for unknown notifications
+		h.sendError(nil, nil, jsonrpc.NewError(
+			jsonrpc.MethodNotFound,
+			fmt.Sprintf("Notification method not found: %s", notif.Method),
+			nil,
+		))
 	}
 }
 
